@@ -6353,7 +6353,7 @@ window.__ModuleLoader__.load({
       const [note, setNote] = useState(null);
 
       const load = () => {
-        fetch('/__dshgo__/auth', { headers: { accept: 'application/json' } })
+        fetch(new URL('__dshgo__/auth', document.baseURI), { headers: { accept: 'application/json' } })
           .then(async (res) => {
             const body = await res.json().catch(() => ({}));
             if (res.ok) setState({ loading: false, hasPassword: !!body.hasPassword, error: null });
@@ -6366,7 +6366,7 @@ window.__ModuleLoader__.load({
       const submit = (password) => {
         setBusy(true);
         setNote(null);
-        fetch('/__dshgo__/auth', {
+        fetch(new URL('__dshgo__/auth', document.baseURI), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ password }),
@@ -6520,7 +6520,7 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         let alive = true;
-        fetch('/__dshgo__/info', { headers: { accept: 'application/json' } })
+        fetch(new URL('__dshgo__/info', document.baseURI), { headers: { accept: 'application/json' } })
           .then((res) => (res.ok ? res.json() : Promise.reject(new Error('HTTP ' + res.status))))
           .then((data) => { if (alive) setInfo(data); })
           .catch((err) => {

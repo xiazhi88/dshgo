@@ -274,10 +274,79 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
     ) { result ->
         val cb = filePathCallback
         filePathCallback = null
-        // parseResult 会把多选、取消、以及 file:///content:// 都归一成 Uri 数组
-        cb?.onReceiveValue(
-            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data),
-        )
+        if (cb == null) {
+            Log.w("dshgo-chooser", "选择器回执回来时没有等待中的 callback，丢弃")
+            return@registerForActivityResult
+        }
+        val uris = pickResult(result.resultCode, result.data)
+        if (uris == null) {
+            // 回 null 时 WebView 只会把 input 清空，**不触发 change 事件**，
+            // 页面看起来就是「选了文件但什么都没发生」。至少给个提示，别让用户以为是自己点错了。
+            Log.w("dshgo-chooser", "选择器没有给出任何 URI（resultCode=${result.resultCode}, data=${result.data}）")
+            Toast.makeText(this, "没有拿到文件 —— 换一个文件管理器再试一次", Toast.LENGTH_LONG).show()
+        }
+        cb.onReceiveValue(uris)
+    }
+
+    /**
+     * 把选择器的回执归一成 Uri 数组。
+     *
+     * 系统的 [WebChromeClient.FileChooserParams.parseResult] 只认「RESULT_OK 且有 clipData
+     * 或 data」这一种形态，其余一律 null。但国产 ROM 的文件选择器（媒体存储、文件管理）
+     * 经常在**真的选了文件**时回 RESULT_CANCELED，或者把选中项放进 clipData 的同时
+     * data 是空的。这时 parseResult 返回 null，而 WebView 收到 null 只会清空 input、
+     * **不触发 change 事件** —— 用户看到的就是「选完文件什么都没发生」。
+     *
+     * 所以这里自己再兜一层：不纠结 resultCode，只要回执里带得出 URI 就用。
+     */
+    private fun pickResult(resultCode: Int, data: Intent?): Array<Uri>? {
+        val fromPlatform = runCatching {
+            WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+        }.getOrNull()
+        if (fromPlatform != null && fromPlatform.isNotEmpty()) return fromPlatform
+        if (data == null) return null
+
+        val uris = mutableListOf<Uri>()
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) clip.getItemAt(i)?.uri?.let(uris::add)
+        }
+        data.data?.let(uris::add)
+        @Suppress("DEPRECATION")
+        val stream = data.extras?.get(Intent.EXTRA_STREAM) as? Uri
+        stream?.let(uris::add)
+
+        val distinct = uris.distinct()
+        return if (distinct.isEmpty()) null else distinct.toTypedArray()
+    }
+
+    /**
+     * 用 `ACTION_OPEN_DOCUMENT` 而不是 [WebChromeClient.FileChooserParams.createIntent]。
+     *
+     * createIntent() 在 MODE_OPEN_MULTIPLE 下给的是 `ACTION_GET_CONTENT + EXTRA_ALLOW_MULTIPLE`，
+     * 这条路上部分 ROM 的选择器不会回 clipData，选中项直接丢。OPEN_DOCUMENT 走系统文档 UI，
+     * 回执稳定，拿到的 URI 还带持久读授权。
+     */
+    private fun chooserIntent(params: WebChromeClient.FileChooserParams): Intent {
+        val types = params.acceptTypes
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+        return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(
+                Intent.EXTRA_ALLOW_MULTIPLE,
+                params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE,
+            )
+            when {
+                types.isEmpty() -> type = "*/*"
+                types.size == 1 && types[0].endsWith("/*") -> type = types[0]
+                else -> {
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+                }
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -679,12 +748,16 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 }
 
                 return try {
-                    fileChooser.launch(params.createIntent())
+                    fileChooser.launch(chooserIntent(params))
                     true
                 } catch (e: ActivityNotFoundException) {
-                    // 没有文件管理器 / 相机：回 null 让页面知道没选到，别把 input 卡死
-                    filePathCallback = null
-                    false
+                    // OPEN_DOCUMENT 不可用（极旧/裁剪 ROM）：退回 dshgo 原来的 GET_CONTENT
+                    val ok = runCatching { fileChooser.launch(params.createIntent()) }.isSuccess
+                    if (!ok) {
+                        // 没有文件管理器 / 相机：回 null 让页面知道没选到，别把 input 卡死
+                        filePathCallback = null
+                    }
+                    ok
                 }
             }
 

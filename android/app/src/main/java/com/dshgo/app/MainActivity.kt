@@ -20,6 +20,7 @@ import com.dshgo.app.data.ComposerWriter
 import java.util.Locale
 import android.widget.Toast
 import android.speech.RecognizerIntent
+import com.dshgo.app.data.DownloadBridge
 import com.dshgo.app.data.AddressPicker
 import android.util.Log
 import android.net.ConnectivityManager
@@ -560,6 +561,16 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
         }
         CookieManager.getInstance().setAcceptThirdPartyCookies(v, true)
 
+        // 网页里的文件下载。DSH 的「下载 / 另存为」是 createObjectURL(blob) + <a download>，
+        // WebView 既不认识 blob:、也不会自己弹任何东西 —— 没有 DownloadListener 时点下载
+        // 就是彻底静默（页面却还提示「已开始下载」）。DownloadBridge 负责 blob: 的取字节
+        // 与 http(s) 的 DownloadManager 两条路。
+        val downloader = DownloadBridge(this, v, prefs.entryUrl())
+        v.addJavascriptInterface(downloader, "dshgoDownload")
+        v.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            downloader.handle(url, userAgent, contentDisposition, mimeType)
+        }
+
         v.webViewClient = object : WebViewClient() {
 
             /**
@@ -584,6 +595,8 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 if (view !== webView) return   // 非活跃的 WebView 不该改当前连接的状态
+                // 记下当前地址：JS 桥线程上读 webView.url 拿不到东西，只能在这里缓存。
+                downloader.noteUrl(url)
                 // 新的一次导航，先把上一次的失败清掉
                 if (ui.pageError != null) ui = ui.copy(pageError = null)
             }
@@ -594,6 +607,11 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 if (view !== webView) return
                 loaded = true
                 clearLoadTimeout()
+
+                // 下载钩子：把页面里 <a download> 对 blob:/data: 的点击截下来交给原生。
+                // 装晚一点再补一次 —— DSH 是单页应用，首屏脚本跑完才可能出现文件卡片。
+                downloader.installHook()
+                view.postDelayed({ downloader.installHook() }, 1500)
 
                 // 从通知点进来的目标会话：页面刚就绪，正好写 localStorage
                 pendingSessionId?.let { pending ->

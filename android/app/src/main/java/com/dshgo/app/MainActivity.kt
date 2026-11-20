@@ -20,6 +20,7 @@ import com.dshgo.app.data.ComposerWriter
 import java.util.Locale
 import android.widget.Toast
 import android.speech.RecognizerIntent
+import com.dshgo.app.data.ClipboardBridge
 import com.dshgo.app.data.AddressPicker
 import android.util.Log
 import android.net.ConnectivityManager
@@ -560,6 +561,13 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
         }
         CookieManager.getInstance().setAcceptThirdPartyCookies(v, true)
 
+        // 文件菜单里的「复制文件路径」最后调的是 `navigator.clipboard.writeText(...)`，
+        // 而它只在**安全上下文**（https / localhost）里存在。手机连的是
+        // `http://10.x.x.x:3081`，页面拿到的就是 undefined，菜单于是永远报「无法复制」。
+        // ClipboardBridge 在页面里装一个替身，把写入转给原生剪贴板。
+        val clipper = ClipboardBridge(this, v, prefs.entryUrl())
+        v.addJavascriptInterface(clipper, "dshgoClipboard")
+
         v.webViewClient = object : WebViewClient() {
 
             /**
@@ -584,6 +592,8 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 if (view !== webView) return   // 非活跃的 WebView 不该改当前连接的状态
+                // 记下当前地址：JS 桥线程上读 webView.url 拿到的是 null
+                clipper.noteUrl(url)
                 // 新的一次导航，先把上一次的失败清掉
                 if (ui.pageError != null) ui = ui.copy(pageError = null)
             }
@@ -594,6 +604,10 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 if (view !== webView) return
                 loaded = true
                 clearLoadTimeout()
+
+                // 剪贴板替身：单页应用里页面可能换过，所以每次载入都装（幂等）。
+                clipper.installHook()
+                view.postDelayed({ clipper.installHook() }, 1500)
 
                 // 从通知点进来的目标会话：页面刚就绪，正好写 localStorage
                 pendingSessionId?.let { pending ->
